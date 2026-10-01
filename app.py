@@ -3,11 +3,13 @@
 
 실행:  streamlit run app.py
 """
+import io
 import threading
 import time
 
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 
 import market
@@ -36,7 +38,14 @@ def get_kis(key, sec, demo):
 KIS_KEY = str(secret("KIS_APP_KEY", "") or "").strip()
 KIS_SECRET = str(secret("KIS_APP_SECRET", "") or "").strip()
 KIS_DEMO = str(secret("KIS_DEMO", "false")).strip().lower() == "true"
-KIS = get_kis(KIS_KEY, KIS_SECRET, KIS_DEMO) if KIS_KEY and KIS_SECRET else None
+HAS_KEYS = bool(KIS_KEY and KIS_SECRET)
+
+st.sidebar.header("⚙️ 데이터 설정")
+USE_KIS = st.sidebar.toggle(
+    "한국투자증권 API 사용", value=HAS_KEYS, disabled=not HAS_KEYS, key="use_kis",
+    help="끄면 야후(지연 시세)로 바뀝니다. 이 브라우저 화면에만 적용되고, 다른 방문자에게는 영향이 없습니다."
+         if HAS_KEYS else "Secrets에 KIS_APP_KEY / KIS_APP_SECRET을 넣으면 켤 수 있습니다.")
+KIS = get_kis(KIS_KEY, KIS_SECRET, KIS_DEMO) if HAS_KEYS and USE_KIS else None
 # 캐시 구분용 꼬리표: 키가 바뀌거나 새로 들어오면 모든 데이터를 새로 받는다
 TAG = f"kis-{KIS_KEY[-4:]}-{int(KIS_DEMO)}" if KIS else "yahoo"
 
@@ -45,6 +54,8 @@ TAG = f"kis-{KIS_KEY[-4:]}-{int(KIS_DEMO)}" if KIS else "yahoo"
 def check_kis(tag):
     """연결 점검: 토큰 발급 → 삼성전자 현재가 조회까지 실제로 해 본다."""
     if KIS is None:
+        if HAS_KEYS:
+            return False, "스위치가 꺼져 있습니다."
         return False, "Secrets에서 KIS_APP_KEY / KIS_APP_SECRET을 찾지 못했습니다."
     try:
         KIS.token()
@@ -55,9 +66,15 @@ def check_kis(tag):
         return True, f"정상 (삼성전자 {q['price']:,.0f}원 조회 성공)"
     except Exception as e:
         return False, f"토큰은 성공, 시세 조회 실패 → {e}"
+
+
 ANTHROPIC_KEY = secret("ANTHROPIC_API_KEY")
 CLAUDE_MODEL = secret("CLAUDE_MODEL", "claude-sonnet-5-5")
 UNIVERSE = build_universe()
+# GitHub이 미리 계산해 둔 지표 파일 위치 (data 브랜치)
+PRECOMPUTED_URL = str(secret("PRECOMPUTED_URL",
+                             "https://raw.githubusercontent.com/sjkim222/stock-dashboard/data/"))
+PRECOMPUTED_MAX_AGE = 36 * 3600  # 이보다 오래된 파일이면 사이트가 직접 계산
 COUNTRY_KR = {"KR": "🇰🇷 한국", "US": "🇺🇸 미국"}
 
 
@@ -91,7 +108,32 @@ def start_rebuild(store):
     threading.Thread(target=_rebuild, args=(store, KIS), daemon=True).start()
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def load_precomputed(url):
+    """미리 계산된 지표 파일. 없거나 읽지 못하면 None."""
+    try:
+        meta = requests.get(url + "meta.json", timeout=10).json()
+        res = requests.get(url + "metrics.csv", timeout=15)
+        res.raise_for_status()
+        df = pd.read_csv(io.StringIO(res.text), dtype={"code": str, "market": str})
+        if df.empty:
+            return None
+        return df, float(meta["fx"]), float(meta["ts"]), meta.get("source", "?")
+    except Exception:
+        return None
+
+
+def precomputed_fresh():
+    pre = load_precomputed(PRECOMPUTED_URL)
+    return pre if pre and time.time() - pre[2] < PRECOMPUTED_MAX_AGE else None
+
+
 def load_metrics(tag):
+    """반환: (지표 표, 환율, 기준 시각, 출처 설명)"""
+    pre = precomputed_fresh()
+    if pre:
+        df, fx, ts, src = pre
+        return df, fx, ts, f"미리 계산 ({src})"
     store = metrics_store(tag)
     if store["df"] is None:
         start_rebuild(store)
@@ -103,7 +145,7 @@ def load_metrics(tag):
             st.stop()
     elif time.time() - store["ts"] > METRICS_TTL:
         start_rebuild(store)  # 옛 표를 보여주는 동안 뒤에서 갱신
-    return store["df"], store["fx"], store["ts"]
+    return store["df"], store["fx"], store["ts"], "사이트에서 직접 계산"
 
 
 @st.cache_data(ttl=60, show_spinner="현재가 갱신 중…")
@@ -218,10 +260,11 @@ def stock_detail(row):
 
 # ---------------- 사이드바 ----------------
 with st.sidebar:
-    st.header("⚙️ 연결 상태")
     ok, msg = check_kis(TAG)
     if ok:
         st.write("주 데이터: 🟢 한국투자증권 API (실시간)")
+    elif HAS_KEYS and not USE_KIS:
+        st.write("주 데이터: ⚪ 증권사 API 꺼짐 → 야후 (지연 시세)")
     elif KIS:
         st.write("주 데이터: 🔴 한국투자증권 연결 실패 → 야후로 대체 중")
     else:
@@ -249,7 +292,7 @@ PAGES = ["🌏 대표지수", "🔍 종목 찾기", "📊 종목 상세"]
 page = st.segmented_control("화면", PAGES, default=PAGES[0], key="page", label_visibility="collapsed") or PAGES[0]
 
 # 첫 화면을 보는 동안 종목 지표를 미리 모아 둔다
-if metrics_store(TAG)["df"] is None:
+if not precomputed_fresh() and metrics_store(TAG)["df"] is None:
     start_rebuild(metrics_store(TAG))
 
 
@@ -285,12 +328,12 @@ if page == PAGES[0]:
 
 # ---------------- 탭 2: 종목 찾기 ----------------
 if page == PAGES[1]:
-    base, fx, ts = load_metrics(TAG)
+    base, fx, ts, metric_src = load_metrics(TAG)
     # 지표를 막 계산했으면 현재가도 최신이므로 재조회 생략
     data = load_live(base, TAG) if KIS and time.time() - ts > 60 else base
     st.caption(f"검색 대상: {len(data)}개 종목 · 원/달러 {fx:,.0f}원 기준 시총 환산 · "
-               f"지표 기준 {pd.Timestamp(ts, unit='s', tz='UTC').tz_convert('Asia/Seoul'):%H:%M}"
-               + (" (갱신 중)" if metrics_store(TAG)["running"] else "") + " · 현재가는 1분마다 갱신")
+               f"지표 기준 {pd.Timestamp(ts, unit='s', tz='UTC').tz_convert('Asia/Seoul'):%m/%d %H:%M} ({metric_src})"
+               + (" (갱신 중)" if metrics_store(TAG)["running"] else "") + (" · 현재가는 1분마다 실시간 갱신" if KIS else ""))
 
     mode = st.radio("검색 방식", ["💬 문장으로", "🏷️ 섹터·테마", "🔢 수치 조건"], horizontal=True)
 
