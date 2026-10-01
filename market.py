@@ -1,58 +1,97 @@
 """
 시세·재무 데이터 계층.
 
-- 실시간 현재가: 한국투자증권 API(KIS)가 설정되어 있으면 사용
-- 차트·수익률·배당 등 재무 지표, 미국 지수: yfinance (키 불필요, 지연 시세)
+한국투자증권 API(KIS) 키가 있으면 KIS가 주 데이터원이다.
+  지수, 현재가, 차트, 수익률, PER·PBR·시총, 52주 고점 → KIS
+  배당수익률 → 야후 (KIS 시세 API에 없음, 실패하면 빈칸)
+키가 없으면 전부 야후(yfinance, 지연 시세)로 동작한다.
 """
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date, timedelta
 
 import pandas as pd
 import yfinance as yf
 
 from themes import INDICES, yf_symbol
 
-FX_FALLBACK = 1400.0  # 환율을 못 받아올 때 쓰는 원/달러 기본값
+FX_FALLBACK = 1400.0
+OHLCV = ["Open", "High", "Low", "Close", "Volume"]
+PERIOD_DAYS = {"5d": 7, "1mo": 31, "3mo": 92, "6mo": 183, "1y": 366, "5y": 1830}
+_OVS_INDEX_CODE = {}  # 해외지수별로 실제 동작한 KIS 코드 기억
 
 
-def usd_krw():
+# ================= 야후 (예비) =================
+def _yf_history(symbol, period="1y", interval="1d"):
     try:
-        h = yf.Ticker("KRW=X").history(period="5d")
-        if not h.empty:
-            return float(h["Close"].dropna().iloc[-1])
+        h = yf.Ticker(symbol).history(period=period, interval=interval)
     except Exception:
-        pass
-    return FX_FALLBACK
+        return pd.DataFrame(columns=OHLCV)
+    if h.empty or "Close" not in h:
+        return pd.DataFrame(columns=OHLCV)
+    h = h[OHLCV].dropna(subset=["Close"])
+    h.index = pd.to_datetime(h.index).tz_localize(None)
+    return h
 
 
 def _yf_quote(symbol):
-    """야후 기준 현재가와 전일 대비. 장중에는 약 15~20분 지연."""
-    h = yf.Ticker(symbol).history(period="5d", interval="1d")
-    closes = h["Close"].dropna()
+    closes = _yf_history(symbol, "5d")["Close"]
     if closes.empty:
         raise ValueError(f"{symbol} 시세 없음")
     last = float(closes.iloc[-1])
     prev = float(closes.iloc[-2]) if len(closes) > 1 else last
-    return {
-        "price": last,
-        "change": last - prev,
-        "change_pct": (last / prev - 1) * 100 if prev else 0.0,
-        "source": "Yahoo 지연",
-    }
+    return {"price": last, "change": last - prev,
+            "change_pct": (last / prev - 1) * 100 if prev else 0.0, "source": "Yahoo 지연"}
+
+
+def _yf_info(symbol):
+    try:
+        return yf.Ticker(symbol).info or {}
+    except Exception:
+        return {}
+
+
+def usd_krw(kis=None):
+    if kis:
+        try:
+            fx = kis.overseas_price("AAPL", "NAS").get("fx")
+            if fx:
+                return float(fx)
+        except Exception:
+            pass
+    closes = _yf_history("KRW=X", "5d")["Close"]
+    return float(closes.iloc[-1]) if not closes.empty else FX_FALLBACK
+
+
+# ================= 지수 =================
+def _kis_ovs_index(kis, it, fn):
+    """해외지수 코드 후보를 차례로 시도하고, 성공한 코드를 기억한다."""
+    codes = [_OVS_INDEX_CODE[it["name"]]] if it["name"] in _OVS_INDEX_CODE else it.get("kis_ovs", [])
+    last_err = None
+    for code in codes:
+        try:
+            out = fn(code)
+            _OVS_INDEX_CODE[it["name"]] = code
+            return out
+        except Exception as e:
+            last_err = e
+    raise last_err or ValueError("코드 없음")
 
 
 def index_quotes(kis=None):
-    """국가별 대표지수 현재값. 국내 지수는 KIS가 있으면 실시간."""
     out = {}
     for country, items in INDICES.items():
         rows = []
         for it in items:
             q = None
-            if kis and it.get("kis"):
+            if kis:
                 try:
-                    q = kis.domestic_index(it["kis"])
-                except Exception as e:  # 실패 시 야후로 대체
-                    q = {"error": str(e)}
-            if not q or "error" in q:
+                    if it.get("kis"):
+                        q = kis.domestic_index(it["kis"])
+                    elif it.get("kis_ovs"):
+                        q = _kis_ovs_index(kis, it, kis.overseas_index)
+                except Exception:
+                    q = None
+            if q is None:
                 try:
                     q = _yf_quote(it["yf"])
                 except Exception as e:
@@ -62,39 +101,69 @@ def index_quotes(kis=None):
     return out
 
 
-def history(symbol, period="1y", interval="1d"):
-    cols = ["Open", "High", "Low", "Close", "Volume"]
-    try:
-        h = yf.Ticker(symbol).history(period=period, interval=interval)
-    except Exception:
-        return pd.DataFrame(columns=cols)
-    if h.empty or "Close" not in h:
-        return pd.DataFrame(columns=cols)
-    return h[cols].dropna(subset=["Close"])
+def index_history(it, period="1y", kis=None):
+    start, end, p = _range(period)
+    if kis:
+        try:
+            if it.get("kis"):
+                df = kis.domestic_index_chart(it["kis"], start, end, p)
+            else:
+                df = _kis_ovs_index(kis, it, lambda c: _nonempty(kis.overseas_index_chart(c, start, end, p)))
+            if not df.empty:
+                return df
+        except Exception:
+            pass
+    return _yf_history(it["yf"], period, "1wk" if p == "W" else "1d")
 
 
+# ================= 종목 =================
 def live_quote(row, kis=None):
-    """종목 한 개의 현재가 (KIS 실시간 → 실패하면 야후 지연)."""
     if kis:
         try:
             if row["country"] == "KR":
                 return kis.domestic_price(row["code"])
-            return kis.overseas_price(row["code"], row["market"])
+            return kis.overseas_price(row["code"], row.get("market", "NAS"))
         except Exception:
             pass
     return _yf_quote(yf_symbol(row))
 
 
-# ---------------- 스크리너용 지표 ----------------
-def _info(symbol):
-    try:
-        return yf.Ticker(symbol).info or {}
-    except Exception:
+def stock_history(row, period="1y", kis=None):
+    start, end, p = _range(period)
+    if kis:
+        try:
+            if row["country"] == "KR":
+                df = kis.domestic_chart(row["code"], start, end, p)
+            else:
+                df = kis.overseas_chart(row["code"], row.get("market", "NAS"), start, p)
+            if not df.empty:
+                return df
+        except Exception:
+            pass
+    return _yf_history(yf_symbol(row), period, "1wk" if p == "W" else "1d")
+
+
+# ================= 스크리너 지표 =================
+def _returns(closes: pd.Series, high_52w=None):
+    closes = closes.dropna()
+    if len(closes) < 2:
         return {}
+    last = closes.iloc[-1]
+
+    def ret(days):
+        return (last / closes.iloc[-1 - days] - 1) * 100 if len(closes) > days else None
+
+    high = max(closes.max(), high_52w or 0)
+    return {
+        "ret_1m": ret(21),
+        "ret_3m": ret(63),
+        "ret_1y": (last / closes.iloc[0] - 1) * 100,
+        "from_high_pct": (last / high - 1) * 100 if high else None,
+    }
 
 
-def _dividend_yield_pct(info, price):
-    """배당수익률(%). yfinance 버전마다 dividendYield 단위가 달라 배당금/주가로 직접 계산."""
+def _div_yield(info, price):
+    """배당수익률(%). yfinance 버전마다 단위가 달라 배당금/주가로 계산."""
     rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate")
     if rate and price:
         return float(rate) / float(price) * 100
@@ -102,95 +171,90 @@ def _dividend_yield_pct(info, price):
     return float(t) * 100 if t is not None else None
 
 
-def _returns(closes: pd.Series):
-    closes = closes.dropna()
-    if len(closes) < 2:
-        return {}
-    last = closes.iloc[-1]
+def _metric_row(r, fx, kis):
+    """한 종목의 비교 지표. KIS가 있으면 KIS, 없거나 실패하면 야후."""
+    base = {"country": r["country"], "code": r["code"], "name": r["name"],
+            "market": r["market"], "themes": ", ".join(r["themes"]),
+            "currency": "KRW" if r["country"] == "KR" else "USD"}
+    sym = yf_symbol(r)
 
-    def ret(days):
-        if len(closes) <= days:
-            return None
-        return (last / closes.iloc[-1 - days] - 1) * 100
+    if kis:
+        try:
+            q = live_quote(r, kis)
+            if q.get("source") == "KIS 실시간":
+                closes = stock_history(r, "1y", kis)["Close"]
+                mcap = q.get("market_cap_krw") or (q["market_cap_usd"] * fx if q.get("market_cap_usd") else None)
+                return {**base, "price": q["price"], "change_pct": q.get("change_pct"),
+                        "market_cap_jo": mcap / 1e12 if mcap else None,
+                        "per": q.get("per") or None, "fwd_per": None, "pbr": q.get("pbr") or None,
+                        "div_yield": None, "source": "KIS 실시간",
+                        **_returns(closes, q.get("high_52w"))}
+        except Exception:
+            pass
 
-    high = closes.max()
-    return {
-        "ret_1m": ret(21),
-        "ret_3m": ret(63),
-        "ret_1y": (last / closes.iloc[0] - 1) * 100,
-        "from_high_pct": (last / high - 1) * 100 if high else None,  # 52주 고점 대비 (0이면 신고가)
-    }
-
-
-def build_metrics(universe):
-    """유니버스 전체 종목의 비교 지표 표를 만든다."""
-    fx = usd_krw()
-    symbols = [yf_symbol(r) for r in universe]
-
-    # 1) 1년 종가를 한 번에 받아 수익률 계산
-    try:
-        px = yf.download(symbols, period="1y", interval="1d", auto_adjust=True,
-                         progress=False, group_by="column", threads=True)["Close"]
-        if isinstance(px, pd.Series):
-            px = px.to_frame(symbols[0])
-    except Exception:
-        px = pd.DataFrame()
-
-    # 2) PER·시가총액·배당 등 기업 정보 (병렬)
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        infos = list(ex.map(_info, symbols))
-
-    rows = []
-    for r, sym, info in zip(universe, symbols, infos):
-        closes = px[sym] if sym in getattr(px, "columns", []) else pd.Series(dtype=float)
-        rets = _returns(closes)
-        c = closes.dropna()
-        day_chg = (c.iloc[-1] / c.iloc[-2] - 1) * 100 if len(c) > 1 else None
-        price = c.iloc[-1] if not c.empty else info.get("currentPrice")
-        mcap = info.get("marketCap")
-        cur = info.get("currency") or ("KRW" if r["country"] == "KR" else "USD")
-        mcap_krw = (mcap * fx if cur == "USD" else mcap) if mcap else None
-        rows.append({
-            "country": r["country"],
-            "code": r["code"],
-            "name": r["name"],
-            "market": r["market"],
-            "themes": ", ".join(r["themes"]),
-            "price": float(price) if price is not None else None,
-            "currency": cur,
-            "change_pct": day_chg,
-            "market_cap_jo": mcap_krw / 1e12 if mcap_krw else None,  # 원화 환산, 조 단위
-            "per": info.get("trailingPE"),
-            "fwd_per": info.get("forwardPE"),
-            "pbr": info.get("priceToBook"),
-            "div_yield": _dividend_yield_pct(info, price),
-            "source": "Yahoo 지연",
-            **rets,
-        })
-
-    return pd.DataFrame(rows), fx
+    # 야후 경로
+    info = _yf_info(sym)
+    closes = _yf_history(sym, "1y")["Close"]
+    c = closes.dropna()
+    price = float(c.iloc[-1]) if not c.empty else info.get("currentPrice")
+    mcap = info.get("marketCap")
+    cur = info.get("currency") or base["currency"]
+    mcap_krw = (mcap * fx if cur == "USD" else mcap) if mcap else None
+    return {**base, "price": price,
+            "change_pct": (c.iloc[-1] / c.iloc[-2] - 1) * 100 if len(c) > 1 else None,
+            "market_cap_jo": mcap_krw / 1e12 if mcap_krw else None,
+            "per": info.get("trailingPE"), "fwd_per": info.get("forwardPE"),
+            "pbr": info.get("priceToBook"), "div_yield": _div_yield(info, price),
+            "source": "Yahoo 지연", **_returns(closes)}
 
 
-def overlay_live(df: pd.DataFrame, kis) -> pd.DataFrame:
-    """KIS 실시간 현재가(국내는 PER·PBR·시총 포함)로 표를 덮어쓴다."""
+def build_metrics(universe, kis=None):
+    fx = usd_krw(kis)
+    # KIS 호출은 내부에서 간격 조절되므로 동시 작업 수만 적당히
+    with ThreadPoolExecutor(max_workers=4 if kis else 8) as ex:
+        rows = list(ex.map(lambda r: _metric_row(r, fx, kis), universe))
+    df = pd.DataFrame(rows)
+
+    # KIS 경로 종목의 배당률은 야후에서 보충 (실패해도 무시)
+    if kis and not df.empty:
+        need = df.index[df["div_yield"].isna()]
+        syms = [yf_symbol(universe[i]) for i in need]
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            infos = list(ex.map(_yf_info, syms))
+        for i, info in zip(need, infos):
+            df.at[i, "div_yield"] = _div_yield(info, df.at[i, "price"]) if info else None
+    return df, fx
+
+
+# ================= 도우미 =================
+def _range(period):
+    end = date.today()
+    start = end - timedelta(days=PERIOD_DAYS.get(period, 366))
+    return start, end, ("W" if period == "5y" else "D")
+
+
+def _nonempty(df):
+    if df.empty:
+        raise ValueError("빈 응답")
+    return df
+
+
+def refresh_prices(df, kis):
+    """스크리너 표의 현재가·등락률만 실시간으로 갱신 (지표는 그대로)."""
     if kis is None or df.empty:
         return df
     df = df.copy()
-    for i, r in df.iterrows():
+
+    def one(i):
         try:
-            q = live_quote(r, kis)
+            return i, live_quote(df.loc[i].to_dict(), kis)
         except Exception:
-            continue
-        if q.get("source") != "KIS 실시간":
-            continue
-        df.at[i, "price"] = q.get("price")
-        df.at[i, "change_pct"] = q.get("change_pct")
-        df.at[i, "source"] = q.get("source")
-        if r["country"] == "KR":
-            if q.get("per"):
-                df.at[i, "per"] = q["per"]
-            if q.get("pbr"):
-                df.at[i, "pbr"] = q["pbr"]
-            if q.get("market_cap_krw"):
-                df.at[i, "market_cap_jo"] = q["market_cap_krw"] / 1e12
+            return i, None
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for i, q in ex.map(one, df.index):
+            if q and q.get("source") == "KIS 실시간":
+                df.at[i, "price"] = q.get("price")
+                df.at[i, "change_pct"] = q.get("change_pct")
+                df.at[i, "source"] = "KIS 실시간"
     return df

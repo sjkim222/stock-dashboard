@@ -11,7 +11,7 @@ import market
 import nl_parser
 from kis import KISClient
 from screener import apply_filters, describe
-from themes import INDICES, THEMES, build_universe, yf_symbol
+from themes import INDICES, THEMES, build_universe
 
 st.set_page_config(page_title="글로벌 주식 대시보드", page_icon="📈", layout="wide")
 
@@ -40,14 +40,14 @@ COUNTRY_KR = {"KR": "🇰🇷 한국", "US": "🇺🇸 미국"}
 
 
 # ---------------- 캐시된 데이터 ----------------
-@st.cache_data(ttl=3600, show_spinner="종목 지표(수익률·PER·배당) 불러오는 중… 처음 한 번은 30초 정도 걸립니다")
+@st.cache_data(ttl=3600, show_spinner="종목 지표(수익률·PER·시총) 불러오는 중… 처음 한 번은 30~60초 걸립니다")
 def load_metrics():
-    return market.build_metrics(UNIVERSE)
+    return market.build_metrics(UNIVERSE, KIS)
 
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner="현재가 갱신 중…")
 def load_live(df):
-    return market.overlay_live(df, KIS)
+    return market.refresh_prices(df, KIS)
 
 
 @st.cache_data(ttl=10, show_spinner=False)
@@ -55,9 +55,16 @@ def load_indices():
     return market.index_quotes(KIS)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def load_history(symbol, period, interval):
-    return market.history(symbol, period, interval)
+@st.cache_data(ttl=300, show_spinner=False)
+def load_stock_history(country, code, market_code, period):
+    row = {"country": country, "code": code, "market": market_code}
+    return market.stock_history(row, period, KIS)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_index_history(name, period):
+    it = next(i for c in INDICES.values() for i in c if i["name"] == name)
+    return market.index_history(it, period, KIS)
 
 
 # ---------------- 표시 도우미 ----------------
@@ -67,8 +74,7 @@ def fmt_price(v, cur):
     return f"₩{v:,.0f}" if cur == "KRW" else f"${v:,.2f}"
 
 
-def price_chart(symbol, title, period="1y", interval="1d", candles=True):
-    h = load_history(symbol, period, interval)
+def price_chart(h, title, candles=True):
     if h.empty:
         st.info("차트 데이터를 받지 못했습니다.")
         return
@@ -145,14 +151,16 @@ def stock_detail(row):
                       key=f'period_{row["code"]}',
                       format_func=lambda p: {"1mo": "1개월", "3mo": "3개월", "6mo": "6개월",
                                              "1y": "1년", "5y": "5년"}[p])
-    interval = "1wk" if period == "5y" else "1d"
-    price_chart(yf_symbol(row), row["name"], period, interval, candles=True)
+    h = load_stock_history(row["country"], row["code"], row.get("market", "KS"), period)
+    price_chart(h, row["name"], candles=True)
 
 
 # ---------------- 사이드바 ----------------
 with st.sidebar:
     st.header("⚙️ 연결 상태")
-    st.write("실시간 시세:", "🟢 한국투자증권 API" if KIS else "🟡 미연결 (야후 지연 시세)")
+    st.write("주 데이터:", "🟢 한국투자증권 API (실시간)" if KIS else "🟡 야후 (지연 시세)")
+    if KIS:
+        st.caption("배당률은 증권사 시세 API에 없어 야후에서 보충합니다. 받지 못하면 빈칸입니다.")
     st.write("자연어 해석:", "🟢 Claude API" if ANTHROPIC_KEY else "🟡 규칙 기반")
     auto = st.toggle("지수 자동 새로고침 (10초)", value=bool(KIS))
     if st.button("🔄 전체 데이터 새로 받기"):
@@ -191,7 +199,7 @@ with tab_idx:
     pick = c1.selectbox("차트로 볼 지수", all_idx, format_func=lambda it: it["name"])
     per = c2.radio("기간 ", ["1mo", "6mo", "1y", "5y"], index=2, horizontal=True,
                    format_func=lambda p: {"1mo": "1개월", "6mo": "6개월", "1y": "1년", "5y": "5년"}[p])
-    price_chart(pick["yf"], pick["name"], per, "1wk" if per == "5y" else "1d", candles=False)
+    price_chart(load_index_history(pick["name"], per), pick["name"], candles=False)
 
 # ---------------- 탭 2: 종목 찾기 ----------------
 with tab_find:
@@ -263,7 +271,7 @@ with tab_one:
         if free.isdigit() and len(free) == 6:
             row = {"country": "KR", "code": free, "name": free, "market": "KS"}
             # 코스피에 없으면 코스닥으로
-            if load_history(f"{free}.KS", "5d", "1d").empty:
+            if not KIS and load_stock_history("KR", free, "KS", "5d").empty:
                 row["market"] = "KQ"
         else:
             row = {"country": "US", "code": free, "name": free, "market": "NAS"}

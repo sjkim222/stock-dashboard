@@ -191,8 +191,9 @@ THEMES = {
 }
 
 # 국가별 대표지수
-#   kis: 한국투자증권 업종코드(국내 지수 실시간 조회용)
-#   yf : 야후 파이낸스 심볼(차트·미국 지수·키 없을 때 대체용)
+#   kis    : 한국투자증권 국내 업종코드
+#   kis_ovs: 한국투자증권 해외지수 코드 후보 (앞에서부터 시도, 모두 실패하면 야후 사용)
+#   yf     : 야후 파이낸스 심볼 (예비용)
 INDICES = {
     "KR": [
         {"name": "KOSPI", "kis": "0001", "yf": "^KS11"},
@@ -200,10 +201,10 @@ INDICES = {
         {"name": "KOSPI 200", "kis": "2001", "yf": "^KS200"},
     ],
     "US": [
-        {"name": "S&P 500", "kis": None, "yf": "^GSPC"},
-        {"name": "NASDAQ", "kis": None, "yf": "^IXIC"},
-        {"name": "다우존스", "kis": None, "yf": "^DJI"},
-        {"name": "필라델피아 반도체", "kis": None, "yf": "^SOX"},
+        {"name": "S&P 500", "kis_ovs": ["SPX", ".INX"], "yf": "^GSPC"},
+        {"name": "NASDAQ", "kis_ovs": ["COMP", ".IXIC"], "yf": "^IXIC"},
+        {"name": "다우존스", "kis_ovs": [".DJI"], "yf": "^DJI"},
+        {"name": "필라델피아 반도체", "kis_ovs": ["SOX", ".SOX"], "yf": "^SOX"},
     ],
 }
 
