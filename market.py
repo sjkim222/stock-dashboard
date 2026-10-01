@@ -144,7 +144,8 @@ def stock_history(row, period="1y", kis=None):
 
 
 # ================= 스크리너 지표 =================
-def _returns(closes: pd.Series, high_52w=None):
+def _returns(closes: pd.Series, high_52w=None, per_month=21):
+    """per_month: 한 달에 해당하는 봉 개수 (일봉 21, 주봉 4)"""
     closes = closes.dropna()
     if len(closes) < 2:
         return {}
@@ -155,8 +156,8 @@ def _returns(closes: pd.Series, high_52w=None):
 
     high = max(closes.max(), high_52w or 0)
     return {
-        "ret_1m": ret(21),
-        "ret_3m": ret(63),
+        "ret_1m": ret(per_month),
+        "ret_3m": ret(per_month * 3),
         "ret_1y": (last / closes.iloc[0] - 1) * 100,
         "from_high_pct": (last / high - 1) * 100 if high else None,
     }
@@ -182,13 +183,19 @@ def _metric_row(r, fx, kis):
         try:
             q = live_quote(r, kis)
             if q.get("source") == "KIS 실시간":
-                closes = stock_history(r, "1y", kis)["Close"]
+                # 수익률 계산용으로는 1년 주봉이면 충분 → 종목당 1회 호출
+                start, end, _ = _range("1y")
+                if r["country"] == "KR":
+                    wk = kis.domestic_chart(r["code"], start, end, "W")
+                else:
+                    wk = kis.overseas_chart(r["code"], q.get("excd") or r["market"], start, "W")
+                closes = wk["Close"]
                 mcap = q.get("market_cap_krw") or (q["market_cap_usd"] * fx if q.get("market_cap_usd") else None)
                 return {**base, "price": q["price"], "change_pct": q.get("change_pct"),
                         "market_cap_jo": mcap / 1e12 if mcap else None,
                         "per": q.get("per") or None, "fwd_per": None, "pbr": q.get("pbr") or None,
                         "div_yield": None, "source": "KIS 실시간",
-                        **_returns(closes, q.get("high_52w"))}
+                        **_returns(closes, q.get("high_52w"), per_month=4)}
         except Exception:
             pass
 

@@ -3,6 +3,9 @@
 
 실행:  streamlit run app.py
 """
+import threading
+import time
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -59,9 +62,48 @@ COUNTRY_KR = {"KR": "🇰🇷 한국", "US": "🇺🇸 미국"}
 
 
 # ---------------- 캐시된 데이터 ----------------
-@st.cache_data(ttl=3600, show_spinner="종목 지표(수익률·PER·시총) 불러오는 중… 처음 한 번은 30~60초 걸립니다")
+METRICS_TTL = 3600  # 지표를 새로 계산하는 주기(초)
+
+
+@st.cache_resource
+def metrics_store(tag):
+    """서버 메모리에 지표 표를 보관. 만료돼도 옛 표를 바로 보여주고 뒤에서 새로 계산한다."""
+    return {"df": None, "fx": None, "ts": 0.0, "running": False, "error": None,
+            "lock": threading.Lock()}
+
+
+def _rebuild(store, kis):
+    try:
+        df, fx = market.build_metrics(UNIVERSE, kis)
+        store.update(df=df, fx=fx, ts=time.time(), error=None)
+    except Exception as e:
+        store["error"] = str(e)
+    finally:
+        store["running"] = False
+
+
+def start_rebuild(store):
+    """이미 계산 중이 아니면 백그라운드 계산을 시작한다."""
+    with store["lock"]:
+        if store["running"]:
+            return
+        store["running"] = True
+    threading.Thread(target=_rebuild, args=(store, KIS), daemon=True).start()
+
+
 def load_metrics(tag):
-    return market.build_metrics(UNIVERSE, KIS)
+    store = metrics_store(tag)
+    if store["df"] is None:
+        start_rebuild(store)
+        with st.spinner("종목 지표를 처음 모으는 중입니다… (이후에는 바로 열립니다)"):
+            while store["running"]:
+                time.sleep(0.5)
+        if store["df"] is None:
+            st.error(f"지표를 불러오지 못했습니다: {store['error']}")
+            st.stop()
+    elif time.time() - store["ts"] > METRICS_TTL:
+        start_rebuild(store)  # 옛 표를 보여주는 동안 뒤에서 갱신
+    return store["df"], store["fx"], store["ts"]
 
 
 @st.cache_data(ttl=60, show_spinner="현재가 갱신 중…")
@@ -198,14 +240,21 @@ with st.sidebar:
     auto = st.toggle("지수 자동 새로고침 (10초)", value=bool(KIS))
     if st.button("🔄 전체 데이터 새로 받기"):
         st.cache_data.clear()
+        start_rebuild(metrics_store(TAG))
         st.rerun()
     st.caption("키 설정 방법은 README.md 참고. 국내 시세 색상은 한국식(상승 빨강)입니다.")
 
 st.title("📈 글로벌 주식 대시보드")
-tab_idx, tab_find, tab_one = st.tabs(["🌏 대표지수", "🔍 종목 찾기", "📊 종목 상세"])
+PAGES = ["🌏 대표지수", "🔍 종목 찾기", "📊 종목 상세"]
+page = st.segmented_control("화면", PAGES, default=PAGES[0], key="page", label_visibility="collapsed") or PAGES[0]
+
+# 첫 화면을 보는 동안 종목 지표를 미리 모아 둔다
+if metrics_store(TAG)["df"] is None:
+    start_rebuild(metrics_store(TAG))
+
 
 # ---------------- 탭 1: 대표지수 ----------------
-with tab_idx:
+if page == PAGES[0]:
 
     @st.fragment(run_every=10 if auto else None)
     def index_board():
@@ -235,10 +284,13 @@ with tab_idx:
     price_chart(load_index_history(pick["name"], per, tag=TAG), pick["name"], candles=False)
 
 # ---------------- 탭 2: 종목 찾기 ----------------
-with tab_find:
-    base, fx = load_metrics(TAG)
-    data = load_live(base, TAG) if KIS else base
-    st.caption(f"검색 대상: themes.py에 등록된 {len(data)}개 종목 · 원/달러 {fx:,.0f}원 기준으로 시총 환산")
+if page == PAGES[1]:
+    base, fx, ts = load_metrics(TAG)
+    # 지표를 막 계산했으면 현재가도 최신이므로 재조회 생략
+    data = load_live(base, TAG) if KIS and time.time() - ts > 60 else base
+    st.caption(f"검색 대상: {len(data)}개 종목 · 원/달러 {fx:,.0f}원 기준 시총 환산 · "
+               f"지표 기준 {pd.Timestamp(ts, unit='s', tz='UTC').tz_convert('Asia/Seoul'):%H:%M}"
+               + (" (갱신 중)" if metrics_store(TAG)["running"] else "") + " · 현재가는 1분마다 갱신")
 
     mode = st.radio("검색 방식", ["💬 문장으로", "🏷️ 섹터·테마", "🔢 수치 조건"], horizontal=True)
 
@@ -295,7 +347,7 @@ with tab_find:
         show_results(apply_filters(data, f), "res_num")
 
 # ---------------- 탭 3: 종목 상세 ----------------
-with tab_one:
+if page == PAGES[2]:
     c1, c2 = st.columns([3, 2])
     choice = c1.selectbox("등록된 종목에서 선택", UNIVERSE,
                           format_func=lambda r: f'{"🇰🇷" if r["country"] == "KR" else "🇺🇸"} {r["name"]} ({r["code"]})')
