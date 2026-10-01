@@ -219,6 +219,41 @@ def _metric_row(r, fx, kis):
             "source": "Yahoo 지연", **_returns(closes)}
 
 
+def dividend_growth(symbol, this_year=None):
+    """배당 성장 지표 (야후 배당 이력 기준, 올해처럼 끝나지 않은 해는 제외).
+    반환: div_cagr_5y(5년 연평균 배당 성장률 %), div_cagr_3y, div_up_years(연속 배당 증가 연수)"""
+    out = {"div_cagr_5y": None, "div_cagr_3y": None, "div_up_years": None}
+    try:
+        d = yf.Ticker(symbol).dividends
+    except Exception:
+        return out
+    if d is None or len(d) == 0:
+        return out
+    d.index = pd.to_datetime(d.index).tz_localize(None) if getattr(d.index, "tz", None) else pd.to_datetime(d.index)
+    this_year = this_year or date.today().year
+    yearly = d.groupby(d.index.year).sum()
+    yearly = yearly[yearly.index < this_year]
+    if yearly.empty:
+        return out
+    last = this_year - 1
+
+    def cagr(n):
+        a, b = yearly.get(last - n), yearly.get(last)
+        if a and b and a > 0 and b > 0:
+            return ((b / a) ** (1 / n) - 1) * 100
+        return None
+
+    out["div_cagr_5y"] = cagr(5)
+    out["div_cagr_3y"] = cagr(3)
+    # 직전 해부터 거꾸로 세며 배당이 늘어난 해가 몇 년 이어졌는지
+    up, y = 0, last
+    while yearly.get(y) and yearly.get(y - 1) and yearly[y] > yearly[y - 1] * 1.001:
+        up += 1
+        y -= 1
+    out["div_up_years"] = up if yearly.get(last) else 0
+    return out
+
+
 def build_metrics(universe, kis=None):
     fx = usd_krw(kis)
     # KIS 호출은 내부에서 간격 조절되므로 동시 작업 수만 적당히
@@ -234,6 +269,14 @@ def build_metrics(universe, kis=None):
             infos = list(ex.map(_yf_info, syms))
         for i, info in zip(need, infos):
             df.at[i, "div_yield"] = _div_yield(info, df.at[i, "price"]) if info else None
+
+    # 배당 성장 지표 (야후 배당 이력)
+    if not df.empty:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            growth = list(ex.map(lambda r: dividend_growth(yf_symbol(r)), universe))
+        g = pd.DataFrame(growth, index=df.index)
+        for col in g.columns:
+            df[col] = g[col]
     return df, fx
 
 

@@ -113,7 +113,8 @@ _METRICS = [
     # (키 접두어, 지표 표현, 숫자 뒤 단위)
     ("per", r"per|주가수익비율|피이알", r"\s*배?"),
     ("pbr", r"pbr|주가순자산비율|피비알", r"\s*배?"),
-    ("div", r"배당(?:수익률|률|금)?", r"\s*(?:%|퍼센트|프로)?"),
+    ("div_cagr_5y", r"배당\s*(?:성장률|성장|증가율|증가)", r"\s*(?:%|퍼센트|프로)?"),
+    ("div", r"배당(?:수익률|률|금)?(?!\s*(?:성장|증가))", r"\s*(?:%|퍼센트|프로)?"),
 ]
 
 
@@ -140,7 +141,7 @@ def _parse_metric(c, prefix, metric_re, unit_re):
         v = float(m.group(1))
         d = _cmp(c.t, a, m.end())
         if d is None:
-            d = "ge" if prefix == "div" else "le"  # "배당 3%" → 3% 이상, "PER 15" → 15 이하
+            d = "ge" if prefix in ("div", "div_cagr_5y") else "le"  # "배당 3%" → 3% 이상, "PER 15" → 15 이하
         c.set(f"{prefix}_{'min' if d == 'ge' else 'max'}", v, True)
         c.used.append((a, m.end()))
 
@@ -166,6 +167,15 @@ def _parse_mcap(c):
         d = _cmp(c.t, a, m.end()) or "ge"
         c.set("market_cap_min" if d == "ge" else "market_cap_max", jo, True)
         c.used.append((a, m.end()))
+
+
+def _parse_div_streak(c):
+    """'5년 연속 배당 증가', '10년 이상 배당 늘린'"""
+    m = re.search(rf"{NUM}\s*년\s*(?:이상\s*)?(?:연속|째|동안|넘게)?\s*(?:으로\s*)?(?:배당)?\s*(?:을|를)?\s*(?:증가|늘|올린|올려|인상|성장)", c.t) \
+        or re.search(rf"배당\s*(?:을|를)?\s*{NUM}\s*년\s*(?:이상\s*)?(?:연속|째|동안)?\s*(?:증가|늘|올린|올려|인상|성장)", c.t)
+    if m:
+        c.set("div_up_years_min", float(m.group(1)), True)
+        c.used.append(m.span())
 
 
 def _parse_high(c):
@@ -335,6 +345,7 @@ _CONCEPTS = [
     (r"저평가|싼\s*주식|싸게|가치주|밸류|저per", {"per_max": 15, "per_min": 0.01}, ("per", True)),
     (r"고평가|비싼", {"per_min": 30}, None),
     (r"저pbr|자산주|청산가치|장부가", {"pbr_max": 1}, ("pbr", True)),
+    (r"배당\s*(?:성장|증가)(?![^\d]{0,8}순)|배당을?\s*꾸준히\s*(?:늘|올)|배당\s*귀족|배당\s*킹", {"div_cagr_5y_min": 5}, ("div_cagr_5y", False)),
     (r"고배당|배당주|배당\s*(?:많|높|좋)(?!\S*\s*순)", {"div_min": 3}, ("div_yield", False)),
     (r"초대형|메가캡|시총\s*최상위", {"market_cap_min": 100}, ("market_cap_jo", False)),
     (r"대형주|대형|우량주|블루칩|대장주", {"market_cap_min": 10}, ("market_cap_jo", False)),
@@ -370,6 +381,7 @@ def _parse_sort(c, period_hint):
         (r"per.{0,4}(?:낮은|싼)\s*순|싼\s*순|저평가\s*순", ("per", True)),
         (r"per.{0,4}높은\s*순|비싼\s*순", ("per", False)),
         (r"pbr.{0,4}(?:낮은|싼)\s*순", ("pbr", True)),
+        (r"배당\s*(?:성장률|성장|증가율).{0,6}(?:높은|큰|좋은)\s*순", ("div_cagr_5y", False)),
         (r"배당.{0,6}(?:높은|많은|큰|좋은)\s*순", ("div_yield", False)),
         (r"(?:오늘|금일|당일).{0,8}(?:많이\s*)?(?:오른|상승|급등|강한)", ("change_pct", False)),
         (r"(?:오늘|금일|당일).{0,8}(?:많이\s*)?(?:빠진|하락|떨어진|내린|급락|약한)", ("change_pct", True)),
@@ -405,6 +417,7 @@ def rule_parse(text: str, fx: float = 1400.0) -> dict:
     compact = c.t.replace(" ", "")
 
     # 1) 숫자가 걸린 조건 (먼저 처리해 숫자 위치를 기록)
+    _parse_div_streak(c)
     _parse_high(c)
     _parse_mcap(c)
     for prefix, metric_re, unit_re in _METRICS:
@@ -462,7 +475,8 @@ def rule_parse(text: str, fx: float = 1400.0) -> dict:
 # ======================= Claude API =======================
 _NUM_FIELDS = ["market_cap_min", "market_cap_max", "per_min", "per_max", "pbr_min", "pbr_max", "div_min",
                "change_pct_min", "change_pct_max", "ret_1m_min", "ret_1m_max", "ret_3m_min", "ret_3m_max",
-               "ret_1y_min", "ret_1y_max", "near_high_pct", "far_from_high_pct"]
+               "ret_1y_min", "ret_1y_max", "near_high_pct", "far_from_high_pct",
+               "div_cagr_5y_min", "div_cagr_5y_max", "div_up_years_min"]
 
 _FILTER_TOOL = {
     "name": "set_filters",
@@ -479,7 +493,8 @@ _FILTER_TOOL = {
             "exclude_codes": {"type": "array", "items": {"type": "string", "enum": list(_BY_CODE)}},
             **{k: {"type": "number"} for k in _NUM_FIELDS},
             "sort_by": {"type": "string", "enum": ["market_cap_jo", "per", "pbr", "div_yield", "change_pct",
-                                                    "ret_1m", "ret_3m", "ret_1y", "from_high_pct"]},
+                                                    "ret_1m", "ret_3m", "ret_1y", "from_high_pct",
+                                                    "div_cagr_5y", "div_up_years"]},
             "ascending": {"type": "boolean"},
             "limit": {"type": "integer"},
             "explanation": {"type": "string", "description": "어떻게 해석했는지 한국어 한두 문장"},
@@ -488,17 +503,31 @@ _FILTER_TOOL = {
 }
 
 
+AVAILABLE_DATA = (
+    "현재가, 오늘 등락률(change_pct), 시가총액(조 원), PER, PBR, 배당수익률(div_yield %), "
+    "5년 연평균 배당성장률(div_cagr_5y %), 배당 연속 증가 연수(div_up_years), "
+    "1개월·3개월·1년 수익률(ret_1m/ret_3m/ret_1y %), 52주 고점 대비(from_high_pct %), 테마, 국가"
+)
+MISSING_DATA = "매출·영업이익·순이익 성장률, 부채비율, ROE, 수급(외국인·기관), 뉴스, 애널리스트 목표가"
+
+
 def _system_prompt():
     names = ", ".join(f'{r["name"]}({r["code"]})' for r in UNIVERSE)
     return (
         "너는 주식 스크리너의 조건 해석기다. 사용자의 문장을 set_filters 도구 입력으로 바꿔라.\n"
-        "단위: market_cap은 조 원(달러는 환율로 환산), 수익률·배당·등락은 %(하락은 음수), "
-        "change_pct는 오늘 등락률, near_high_pct는 52주 고점에서 이 % 이내, far_from_high_pct는 고점 대비 이 % 이상 하락.\n"
-        "모호한 표현 기준: 저평가→PER 0.01~15, 고배당→배당 3% 이상, 대형주→시총 10조 이상, 소형주→1조 이하, "
-        "모멘텀→3개월 15% 이상, 반등→고점 대비 15% 이상 하락이면서 1개월 0% 이상, 흑자→PER 0.01 이상.\n"
-        "'X 같은/비슷한' 종목이면 X의 테마로 찾고 X는 exclude_codes에 넣는다.\n"
+        f"보유 데이터: {AVAILABLE_DATA}.\n"
+        f"없는 데이터: {MISSING_DATA}. 이런 조건을 요청받으면 explanation에 '해당 데이터가 없다'고 분명히 적고, "
+        "의미가 가장 가까운 보유 데이터로 대체할 수 있으면 대체한 뒤 무엇으로 대체했는지 적어라.\n"
+        "단위: market_cap은 조 원(달러는 약 1,400원으로 환산), 수익률·배당·등락은 %(하락은 음수), "
+        "near_high_pct는 52주 고점에서 이 % 이내, far_from_high_pct는 고점 대비 이 % 이상 하락.\n"
+        "모호한 표현 기준: 저평가→PER 0.01~15, 고배당→배당 3% 이상, 배당성장→5년 배당성장률 5% 이상, "
+        "대형주→시총 10조 이상, 소형주→1조 이하, 모멘텀→3개월 15% 이상, "
+        "반등→고점 대비 15% 이상 하락이면서 1개월 0% 이상, 흑자→PER 0.01 이상.\n"
+        "'X 같은/비슷한' 종목이면 X의 테마로 찾고 X는 exclude_codes에 넣는다. "
+        "특정 종목에 대한 질문(예: '삼성전자 지금 어때')이면 codes에 그 종목을 넣는다.\n"
         f"검색 가능한 종목: {names}\n"
-        "목록에 없는 테마·종목이면 가장 가까운 것을 고르고 explanation에 그 사실을 적는다."
+        "목록에 없는 종목·테마면 가장 가까운 것을 고르고 explanation에 그 사실을 적는다. "
+        "explanation은 한국어 한두 문장."
     )
 
 
@@ -509,7 +538,7 @@ def claude_parse(text: str, api_key: str, model: str) -> dict:
     msg = client.messages.create(
         model=model,
         max_tokens=800,
-        system=_system_prompt(),
+        system=[{"type": "text", "text": _system_prompt(), "cache_control": {"type": "ephemeral"}}],
         tools=[_FILTER_TOOL],
         tool_choice={"type": "tool", "name": "set_filters"},
         messages=[{"role": "user", "content": text}],

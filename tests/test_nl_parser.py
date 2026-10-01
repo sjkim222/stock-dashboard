@@ -60,6 +60,16 @@ CASES += [
  ("배당 좋은 미국주", {"div_min":3,"countries":["US"]}),
 ]
 
+CASES += [
+ ("배당성장률 높은 미국주", {"div_cagr_5y_min":5,"countries":["US"],"sort_by":"div_cagr_5y"}),
+ ("배당 성장률 10% 이상", {"div_cagr_5y_min":10}),
+ ("배당성장률 높은 순", {"div_cagr_5y_min":None,"sort_by":"div_cagr_5y"}),
+ ("5년 연속 배당 증가한 종목", {"div_up_years_min":5}),
+ ("배당을 10년 이상 연속 늘린 기업", {"div_up_years_min":10}),
+ ("배당 꾸준히 늘리는 고배당주", {"div_cagr_5y_min":5,"div_min":3}),
+ ("배당수익률 3% 이상이고 배당성장률 7% 이상", {"div_min":3,"div_cagr_5y_min":7}),
+]
+
 
 def run():
     fail = 0

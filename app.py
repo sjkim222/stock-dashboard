@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
+import ai_commentary
 import market
 import nl_parser
 from kis import KISClient
@@ -153,6 +154,12 @@ def load_live(df, tag):
     return market.refresh_prices(df, KIS)
 
 
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=500)
+def cached_parse(q, use_ai, fx):
+    """같은 문장은 하루 동안 다시 해석하지 않는다 (AI 비용 절감)."""
+    return nl_parser.parse(q, ANTHROPIC_KEY if use_ai else None, CLAUDE_MODEL, fx=fx)
+
+
 @st.cache_data(ttl=10, show_spinner=False)
 def load_indices(tag):
     return market.index_quotes(KIS)
@@ -211,11 +218,17 @@ RESULT_COLUMNS = {
     "ret_1m": st.column_config.NumberColumn("1개월", format="%.1f%%"),
     "ret_1y": st.column_config.NumberColumn("1년", format="%.1f%%"),
     "from_high_pct": st.column_config.NumberColumn("52주고점대비", format="%.1f%%"),
+    "div_cagr_5y": st.column_config.NumberColumn("배당성장(5년)", format="%.1f%%",
+                                                 help="5년 연평균 배당 성장률 (야후 배당 이력 기준)"),
+    "div_up_years": st.column_config.NumberColumn("배당↑연속", format="%d년", help="배당이 연속으로 늘어난 해 수"),
     "source": st.column_config.TextColumn("시세", width="small"),
 }
 
 
 def show_results(res: pd.DataFrame, key: str):
+    if res.attrs.get("missing"):
+        st.warning("아직 데이터가 준비되지 않아 적용하지 못한 조건: " + ", ".join(res.attrs["missing"])
+                   + " — 다음 지표 사전 계산 이후 반영됩니다.")
     if res.empty:
         st.warning("조건에 맞는 종목이 없습니다. 조건을 조금 완화해 보세요.")
         return
@@ -223,7 +236,8 @@ def show_results(res: pd.DataFrame, key: str):
     view["country"] = view["country"].map({"KR": "🇰🇷", "US": "🇺🇸"})
     view["price_txt"] = [fmt_price(p, c) for p, c in zip(res["price"], res["currency"])]
     st.caption(f"{len(view)}개 종목 · 행을 클릭하면 아래에 차트가 열립니다")
-    event = st.dataframe(view[list(RESULT_COLUMNS)], column_config=RESULT_COLUMNS,
+    cols = [c for c in RESULT_COLUMNS if c in view.columns]
+    event = st.dataframe(view[cols], column_config={c: RESULT_COLUMNS[c] for c in cols},
                          hide_index=True, width="stretch",
                          on_select="rerun", selection_mode="single-row", key=key)
     picked = event.selection.rows if event and event.selection else []
@@ -338,43 +352,77 @@ if page == PAGES[1]:
     mode = st.radio("검색 방식", ["💬 문장으로", "🏷️ 섹터·테마", "🔢 수치 조건"], horizontal=True)
 
     if mode == "💬 문장으로":
-        examples = ["엔비디아 같은 종목", "1년간 50% 넘게 오른 방산주", "PER 10~20 사이 흑자 금융주",
-                    "고점 대비 30% 이상 빠진 2차전지", "반도체 빼고 한국 대형주 배당 높은 순",
-                    "모멘텀 좋은 미국 AI주 상위 5개", "삼전이랑 하닉 비교"]
-        ex = st.pills("예시", examples, key="ex")
-        q = st.text_input("원하는 종목을 문장으로 적어주세요", value=ex or "",
+        ai_ready = bool(ANTHROPIC_KEY)
+        use_ai = st.toggle(
+            "🤖 AI 모드 — Claude가 문장을 이해하고 결과를 해설", value=ai_ready, disabled=not ai_ready,
+            help="검색 1회에 약 20~30원의 Claude API 비용이 듭니다. 같은 질문은 하루 동안 다시 계산하지 않습니다."
+                 if ai_ready else "Secrets에 ANTHROPIC_API_KEY를 넣으면 켤 수 있습니다. 지금은 규칙 기반 해석기로 동작합니다.")
+        if use_ai:
+            examples = ["배당을 꾸준히 늘려 온 미국 배당주 추천해줘", "엔비디아랑 비슷한데 덜 오른 종목 있어?",
+                        "요즘 많이 빠졌는데 PER은 싼 한국 대형주", "삼전이랑 하닉 지금 숫자로 비교해줘",
+                        "방산주 중에 아직 고점 근처인 것만"]
+        else:
+            examples = ["엔비디아 같은 종목", "1년간 50% 넘게 오른 방산주", "PER 10~20 사이 흑자 금융주",
+                        "5년 연속 배당 증가한 종목", "반도체 빼고 한국 대형주 배당 높은 순",
+                        "모멘텀 좋은 미국 AI주 상위 5개", "삼전이랑 하닉 비교"]
+        ex = st.pills("예시", examples, key=f"ex_{use_ai}")
+        q = st.text_input("원하는 종목이나 궁금한 점을 문장으로 적어주세요", value=ex or "",
                           placeholder="예: 시총 1조~10조 사이 저평가 반도체 장비주")
-        with st.expander("이런 표현을 알아들어요"):
-            st.markdown(
-                "- **비교**: 이상·넘게·최소 / 이하·미만·까지·넘지 않는·최대 / `10~20 사이`\n"
-                "- **단위**: `5천억`, `10조`, `1000억 달러`, `%`, `배`\n"
-                "- **기간 수익률**: `오늘 3% 이상 급등`, `한 달 새 10% 빠진`, `3개월 20% 이상`, `1년간 50% 넘게 오른`\n"
-                "- **개념어**: 저평가, 고배당, 우량주·대형주·소형주, 모멘텀, 반등, 흑자, 신고가, 낙폭과대, 저PBR\n"
-                "- **종목**: 이름·별칭(삼전, 하닉, 엔솔)·티커(NVDA), `○○ 같은/비슷한` → 같은 테마의 다른 종목\n"
-                "- **제외**: `반도체 빼고`, `미국 말고`, `테슬라 제외`\n"
-                "- **정렬·개수**: `배당 높은 순`, `많이 오른 순`, `시총 큰 순`, `상위 5개`, `세 종목`\n"
-                "- 오타는 비슷한 테마·종목 이름으로 보정합니다 (예: 반도채 → 반도체)")
+        if not use_ai:
+            with st.expander("이런 표현을 알아들어요"):
+                st.markdown(
+                    "- **비교**: 이상·넘게·최소 / 이하·미만·까지·넘지 않는·최대 / `10~20 사이`\n"
+                    "- **단위**: `5천억`, `10조`, `1000억 달러`, `%`, `배`\n"
+                    "- **기간 수익률**: `오늘 3% 이상 급등`, `한 달 새 10% 빠진`, `3개월 20% 이상`, `1년간 50% 넘게 오른`\n"
+                    "- **배당**: `배당 3% 이상`, `배당성장률 7% 이상`, `5년 연속 배당 증가`, `배당 꾸준히 늘린`\n"
+                    "- **개념어**: 저평가, 고배당, 배당성장, 우량주·대형주·소형주, 모멘텀, 반등, 흑자, 신고가, 낙폭과대, 저PBR\n"
+                    "- **종목**: 이름·별칭(삼전, 하닉, 엔솔)·티커(NVDA), `○○ 같은/비슷한` → 같은 테마의 다른 종목\n"
+                    "- **제외**: `반도체 빼고`, `미국 말고`, `테슬라 제외`\n"
+                    "- **정렬·개수**: `배당 높은 순`, `많이 오른 순`, `시총 큰 순`, `상위 5개`, `세 종목`\n"
+                    "- 오타는 비슷한 테마·종목 이름으로 보정합니다 (예: 반도채 → 반도체)")
         if q:
-            with st.spinner("조건 해석 중…"):
-                f, how, notes = nl_parser.parse(q, ANTHROPIC_KEY, CLAUDE_MODEL, fx=fx)
+            with st.spinner("AI가 질문을 이해하는 중…" if use_ai else "조건 해석 중…"):
+                f, how, notes = cached_parse(q, use_ai, round(fx))
             names = dict(zip(data["code"].astype(str), data["name"]))
-            msg = f"**해석 ({how})**: {describe(f, names)}"
+            desc = describe(f, names)
+            msg = f"**해석 ({how})**: {desc}"
             if notes:
                 msg += "\n\n" + "\n".join(f"- {n}" for n in notes)
-            if describe(f, names).startswith("조건 없음"):
-                st.warning(msg + "\n\n알아들은 조건이 없어 전체를 보여줍니다. 아래 '이런 표현을 알아들어요'를 참고해 주세요.")
+            if desc.startswith("조건 없음"):
+                st.warning(msg + ("" if use_ai else "\n\n알아들은 조건이 없어 전체를 보여줍니다. "
+                                                   "'이런 표현을 알아들어요'를 참고해 주세요."))
             else:
                 st.info(msg)
-            show_results(apply_filters(data, f), "res_nl")
+            res = apply_filters(data, f)
+
+            if use_ai:
+                data_time = f"{pd.Timestamp(ts, unit='s', tz='UTC').tz_convert('Asia/Seoul'):%Y-%m-%d %H:%M} KST"
+                cache = st.session_state.setdefault("ai_answers", {})
+                ckey = (q, data_time, len(res), tuple(res["code"].astype(str).head(20)))
+                with st.container(border=True):
+                    st.markdown("**🤖 AI 해설**")
+                    if ckey in cache:
+                        st.markdown(cache[ckey])
+                    else:
+                        try:
+                            text = st.write_stream(ai_commentary.stream_answer(
+                                q, desc, "\n".join(notes), res, data_time, ANTHROPIC_KEY, CLAUDE_MODEL))
+                            cache[ckey] = text
+                        except Exception as e:
+                            st.warning(f"AI 해설을 만들지 못했습니다: {e}")
+                    st.caption(f"표의 숫자({data_time} 기준)만 근거로 작성한 해설이며 투자 권유가 아닙니다.")
+            show_results(res, "res_nl")
 
     elif mode == "🏷️ 섹터·테마":
         c1, c2 = st.columns([1, 3])
         countries = c1.multiselect("국가", ["KR", "US"], default=["KR", "US"], format_func=COUNTRY_KR.get)
         themes = c2.multiselect("테마 (여러 개 선택 가능)", list(THEMES), default=["반도체"])
-        sort_by = st.selectbox("정렬", ["market_cap_jo", "change_pct", "ret_1m", "ret_1y", "per", "div_yield"],
+        sort_by = st.selectbox("정렬", ["market_cap_jo", "change_pct", "ret_1m", "ret_1y", "per", "div_yield",
+                                      "div_cagr_5y"],
                                format_func=lambda k: {"market_cap_jo": "시가총액 큰 순", "change_pct": "오늘 등락률",
                                                       "ret_1m": "1개월 수익률", "ret_1y": "1년 수익률",
-                                                      "per": "PER 낮은 순", "div_yield": "배당률 높은 순"}[k])
+                                                      "per": "PER 낮은 순", "div_yield": "배당률 높은 순",
+                                                      "div_cagr_5y": "배당성장률 높은 순"}[k])
         f = {"countries": countries, "themes": themes, "sort_by": sort_by, "ascending": sort_by == "per"}
         show_results(apply_filters(data, f), "res_theme")
 
@@ -386,6 +434,7 @@ if page == PAGES[1]:
         mcap = c1.slider("시가총액 (조원)", 0, 6000, (0, 6000), step=10)
         per_rng = c2.slider("PER", 0, 100, (0, 100))
         div_min = c3.slider("배당률 최소 (%)", 0.0, 8.0, 0.0, 0.5)
+        dg_min = c3.slider("5년 배당성장률 최소 (%)", 0, 30, 0, help="0이면 조건 없음")
         c1, c2, c3 = st.columns(3)
         r1y = c1.slider("1년 수익률 (%)", -100, 500, (-100, 500), step=5)
         r1m = c2.slider("1개월 수익률 (%)", -50, 100, (-50, 100))
@@ -398,6 +447,8 @@ if page == PAGES[1]:
             f["per_min"], f["per_max"] = per_rng
         if div_min > 0:
             f["div_min"] = div_min
+        if dg_min > 0:
+            f["div_cagr_5y_min"] = dg_min
         if r1y != (-100, 500):
             f["ret_1y_min"], f["ret_1y_max"] = r1y
         if r1m != (-50, 100):

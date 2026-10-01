@@ -11,6 +11,8 @@ FILTER 키 (모두 선택 사항, 없으면 조건 없음)
   div_min                         배당수익률 하한 (%)
   change_pct_min / max            오늘 등락률 (%)
   ret_1m_ / ret_3m_ / ret_1y_ min·max   기간 수익률 (%)
+  div_cagr_5y_min / max           5년 연평균 배당 성장률 (%)
+  div_up_years_min                배당 연속 증가 연수
   near_high_pct                   52주 고점 대비 이 % 이내
   far_from_high_pct               52주 고점 대비 이 % 이상 하락
   sort_by / ascending / limit     정렬·개수
@@ -18,7 +20,7 @@ FILTER 키 (모두 선택 사항, 없으면 조건 없음)
 import pandas as pd
 
 SORTABLE = {"market_cap_jo", "per", "fwd_per", "pbr", "div_yield", "ret_1m", "ret_3m",
-            "ret_1y", "change_pct", "from_high_pct"}
+            "ret_1y", "change_pct", "from_high_pct", "div_cagr_5y", "div_up_years"}
 RANGES = [  # (컬럼, 하한 키, 상한 키)
     ("market_cap_jo", "market_cap_min", "market_cap_max"),
     ("per", "per_min", "per_max"),
@@ -28,6 +30,8 @@ RANGES = [  # (컬럼, 하한 키, 상한 키)
     ("ret_1m", "ret_1m_min", "ret_1m_max"),
     ("ret_3m", "ret_3m_min", "ret_3m_max"),
     ("ret_1y", "ret_1y_min", "ret_1y_max"),
+    ("div_cagr_5y", "div_cagr_5y_min", "div_cagr_5y_max"),
+    ("div_up_years", "div_up_years_min", "div_up_years_max"),
 ]
 
 
@@ -55,10 +59,13 @@ def apply_filters(df: pd.DataFrame, f: dict) -> pd.DataFrame:
     if f.get("exclude_codes"):
         m &= ~df["code"].astype(str).isin([str(c) for c in f["exclude_codes"]])
 
+    missing = []  # 데이터에 컬럼이 없어 적용하지 못한 조건
     for col, lo_key, hi_key in RANGES:
-        if col not in df:
-            continue
         lo, hi = f.get(lo_key), f.get(hi_key)
+        if col not in df:
+            if lo is not None or hi is not None:
+                missing.append(col)
+            continue
         if lo is not None:
             m &= df[col].notna() & (df[col] >= lo)
         if hi is not None:
@@ -73,15 +80,20 @@ def apply_filters(df: pd.DataFrame, f: dict) -> pd.DataFrame:
 
     out = df[m].copy()
     sort_by = f.get("sort_by") if f.get("sort_by") in SORTABLE else "market_cap_jo"
+    if sort_by not in out.columns:
+        missing.append(sort_by)
+        sort_by = "market_cap_jo"
     out = out.sort_values(sort_by, ascending=bool(f.get("ascending", False)), na_position="last")
     if f.get("limit"):
         out = out.head(int(f["limit"]))
+    out.attrs["missing"] = [SORT_NAMES.get(c, c) for c in dict.fromkeys(missing)]
     return out
 
 
 SORT_NAMES = {"market_cap_jo": "시가총액", "per": "PER", "fwd_per": "예상 PER", "pbr": "PBR",
               "div_yield": "배당률", "change_pct": "오늘 등락률", "ret_1m": "1개월 수익률",
-              "ret_3m": "3개월 수익률", "ret_1y": "1년 수익률", "from_high_pct": "52주 고점 대비"}
+              "ret_3m": "3개월 수익률", "ret_1y": "1년 수익률", "from_high_pct": "52주 고점 대비",
+              "div_cagr_5y": "5년 배당성장률", "div_up_years": "연속 배당 증가"}
 
 
 def _fmt(v):
@@ -109,6 +121,7 @@ def describe(f: dict, names: dict = None) -> str:
     labels = {
         "market_cap_jo": ("시총", "조"), "per": ("PER", ""), "pbr": ("PBR", ""), "div_yield": ("배당", "%"),
         "change_pct": ("오늘", "%"), "ret_1m": ("1개월", "%"), "ret_3m": ("3개월", "%"), "ret_1y": ("1년", "%"),
+        "div_cagr_5y": ("5년 배당성장률", "%"), "div_up_years": ("배당 연속 증가", "년"),
     }
     for col, lo_key, hi_key in RANGES:
         name, unit = labels[col]
