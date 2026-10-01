@@ -154,7 +154,11 @@ def _returns(closes: pd.Series, high_52w=None, per_month=21):
     def ret(days):
         return (last / closes.iloc[-1 - days] - 1) * 100 if len(closes) > days else None
 
-    high = max(closes.max(), high_52w or 0)
+    # 증권사가 주는 52주 최고가는 종목에 따라 차트와 맞지 않는 값이 섞여 올 수 있어,
+    # 차트 최고 종가보다 15% 넘게 높으면 믿지 않고 차트 값을 쓴다
+    high = closes.max()
+    if high_52w and high_52w <= high * 1.15:
+        high = max(high, high_52w)
     return {
         "ret_1m": ret(per_month),
         "ret_3m": ret(per_month * 3),
