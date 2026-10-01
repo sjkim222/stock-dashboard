@@ -25,14 +25,33 @@ def secret(key, default=None):
 
 
 @st.cache_resource
-def get_kis():
-    key, sec = secret("KIS_APP_KEY"), secret("KIS_APP_SECRET")
-    if not key or not sec:
-        return None
-    return KISClient(key, sec, demo=str(secret("KIS_DEMO", "false")).lower() == "true")
+def get_kis(key, sec, demo):
+    # 키 값이 인자라서 Secrets를 바꾸면 새 클라이언트가 만들어진다
+    return KISClient(key, sec, demo=demo)
 
 
-KIS = get_kis()
+KIS_KEY = str(secret("KIS_APP_KEY", "") or "").strip()
+KIS_SECRET = str(secret("KIS_APP_SECRET", "") or "").strip()
+KIS_DEMO = str(secret("KIS_DEMO", "false")).strip().lower() == "true"
+KIS = get_kis(KIS_KEY, KIS_SECRET, KIS_DEMO) if KIS_KEY and KIS_SECRET else None
+# 캐시 구분용 꼬리표: 키가 바뀌거나 새로 들어오면 모든 데이터를 새로 받는다
+TAG = f"kis-{KIS_KEY[-4:]}-{int(KIS_DEMO)}" if KIS else "yahoo"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def check_kis(tag):
+    """연결 점검: 토큰 발급 → 삼성전자 현재가 조회까지 실제로 해 본다."""
+    if KIS is None:
+        return False, "Secrets에서 KIS_APP_KEY / KIS_APP_SECRET을 찾지 못했습니다."
+    try:
+        KIS.token()
+    except Exception as e:
+        return False, str(e)
+    try:
+        q = KIS.domestic_price("005930")
+        return True, f"정상 (삼성전자 {q['price']:,.0f}원 조회 성공)"
+    except Exception as e:
+        return False, f"토큰은 성공, 시세 조회 실패 → {e}"
 ANTHROPIC_KEY = secret("ANTHROPIC_API_KEY")
 CLAUDE_MODEL = secret("CLAUDE_MODEL", "claude-sonnet-5-5")
 UNIVERSE = build_universe()
@@ -41,28 +60,28 @@ COUNTRY_KR = {"KR": "🇰🇷 한국", "US": "🇺🇸 미국"}
 
 # ---------------- 캐시된 데이터 ----------------
 @st.cache_data(ttl=3600, show_spinner="종목 지표(수익률·PER·시총) 불러오는 중… 처음 한 번은 30~60초 걸립니다")
-def load_metrics():
+def load_metrics(tag):
     return market.build_metrics(UNIVERSE, KIS)
 
 
 @st.cache_data(ttl=60, show_spinner="현재가 갱신 중…")
-def load_live(df):
+def load_live(df, tag):
     return market.refresh_prices(df, KIS)
 
 
 @st.cache_data(ttl=10, show_spinner=False)
-def load_indices():
+def load_indices(tag):
     return market.index_quotes(KIS)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_stock_history(country, code, market_code, period):
+def load_stock_history(country, code, market_code, period, tag=None):
     row = {"country": country, "code": code, "market": market_code}
     return market.stock_history(row, period, KIS)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_index_history(name, period):
+def load_index_history(name, period, tag=None):
     it = next(i for c in INDICES.values() for i in c if i["name"] == name)
     return market.index_history(it, period, KIS)
 
@@ -151,14 +170,28 @@ def stock_detail(row):
                       key=f'period_{row["code"]}',
                       format_func=lambda p: {"1mo": "1개월", "3mo": "3개월", "6mo": "6개월",
                                              "1y": "1년", "5y": "5년"}[p])
-    h = load_stock_history(row["country"], row["code"], row.get("market", "KS"), period)
+    h = load_stock_history(row["country"], row["code"], row.get("market", "KS"), period, tag=TAG)
     price_chart(h, row["name"], candles=True)
 
 
 # ---------------- 사이드바 ----------------
 with st.sidebar:
     st.header("⚙️ 연결 상태")
-    st.write("주 데이터:", "🟢 한국투자증권 API (실시간)" if KIS else "🟡 야후 (지연 시세)")
+    ok, msg = check_kis(TAG)
+    if ok:
+        st.write("주 데이터: 🟢 한국투자증권 API (실시간)")
+    elif KIS:
+        st.write("주 데이터: 🔴 한국투자증권 연결 실패 → 야후로 대체 중")
+    else:
+        st.write("주 데이터: 🟡 야후 (지연 시세)")
+    with st.expander("🔧 증권사 연결 점검", expanded=not ok and KIS is not None):
+        st.write(f"APP KEY: {'✅ ' + str(len(KIS_KEY)) + '자 감지' if KIS_KEY else '❌ 없음'}")
+        st.write(f"APP SECRET: {'✅ ' + str(len(KIS_SECRET)) + '자 감지' if KIS_SECRET else '❌ 없음'}")
+        st.write(f"모드: {'모의투자' if KIS_DEMO else '실전'}")
+        st.write(f"결과: {msg}")
+        if st.button("다시 점검"):
+            check_kis.clear()
+            st.rerun()
     if KIS:
         st.caption("배당률은 증권사 시세 API에 없어 야후에서 보충합니다. 받지 못하면 빈칸입니다.")
     st.write("자연어 해석:", "🟢 Claude API" if ANTHROPIC_KEY else "🟡 규칙 기반")
@@ -176,7 +209,7 @@ with tab_idx:
 
     @st.fragment(run_every=10 if auto else None)
     def index_board():
-        data = load_indices()
+        data = load_indices(TAG)
         for country in ("KR", "US"):
             st.subheader(COUNTRY_KR[country])
             cols = st.columns(len(data[country]))
@@ -199,12 +232,12 @@ with tab_idx:
     pick = c1.selectbox("차트로 볼 지수", all_idx, format_func=lambda it: it["name"])
     per = c2.radio("기간 ", ["1mo", "6mo", "1y", "5y"], index=2, horizontal=True,
                    format_func=lambda p: {"1mo": "1개월", "6mo": "6개월", "1y": "1년", "5y": "5년"}[p])
-    price_chart(load_index_history(pick["name"], per), pick["name"], candles=False)
+    price_chart(load_index_history(pick["name"], per, tag=TAG), pick["name"], candles=False)
 
 # ---------------- 탭 2: 종목 찾기 ----------------
 with tab_find:
-    base, fx = load_metrics()
-    data = load_live(base) if KIS else base
+    base, fx = load_metrics(TAG)
+    data = load_live(base, TAG) if KIS else base
     st.caption(f"검색 대상: themes.py에 등록된 {len(data)}개 종목 · 원/달러 {fx:,.0f}원 기준으로 시총 환산")
 
     mode = st.radio("검색 방식", ["💬 문장으로", "🏷️ 섹터·테마", "🔢 수치 조건"], horizontal=True)
@@ -271,7 +304,7 @@ with tab_one:
         if free.isdigit() and len(free) == 6:
             row = {"country": "KR", "code": free, "name": free, "market": "KS"}
             # 코스피에 없으면 코스닥으로
-            if not KIS and load_stock_history("KR", free, "KS", "5d").empty:
+            if not KIS and load_stock_history("KR", free, "KS", "5d", tag=TAG).empty:
                 row["market"] = "KQ"
         else:
             row = {"country": "US", "code": free, "name": free, "market": "NAS"}
