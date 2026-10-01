@@ -338,15 +338,33 @@ if page == PAGES[1]:
     mode = st.radio("검색 방식", ["💬 문장으로", "🏷️ 섹터·테마", "🔢 수치 조건"], horizontal=True)
 
     if mode == "💬 문장으로":
-        examples = ["PER 15 이하인 미국 반도체주", "배당 3% 이상 한국 금융주", "52주 신고가 근처 방산주",
-                    "고점 대비 많이 빠진 2차전지", "시총 100조 이상 AI 빅테크 1년 수익률 높은 순"]
+        examples = ["엔비디아 같은 종목", "1년간 50% 넘게 오른 방산주", "PER 10~20 사이 흑자 금융주",
+                    "고점 대비 30% 이상 빠진 2차전지", "반도체 빼고 한국 대형주 배당 높은 순",
+                    "모멘텀 좋은 미국 AI주 상위 5개", "삼전이랑 하닉 비교"]
         ex = st.pills("예시", examples, key="ex")
         q = st.text_input("원하는 종목을 문장으로 적어주세요", value=ex or "",
-                          placeholder="예: 저평가된 한국 반도체 장비주")
+                          placeholder="예: 시총 1조~10조 사이 저평가 반도체 장비주")
+        with st.expander("이런 표현을 알아들어요"):
+            st.markdown(
+                "- **비교**: 이상·넘게·최소 / 이하·미만·까지·넘지 않는·최대 / `10~20 사이`\n"
+                "- **단위**: `5천억`, `10조`, `1000억 달러`, `%`, `배`\n"
+                "- **기간 수익률**: `오늘 3% 이상 급등`, `한 달 새 10% 빠진`, `3개월 20% 이상`, `1년간 50% 넘게 오른`\n"
+                "- **개념어**: 저평가, 고배당, 우량주·대형주·소형주, 모멘텀, 반등, 흑자, 신고가, 낙폭과대, 저PBR\n"
+                "- **종목**: 이름·별칭(삼전, 하닉, 엔솔)·티커(NVDA), `○○ 같은/비슷한` → 같은 테마의 다른 종목\n"
+                "- **제외**: `반도체 빼고`, `미국 말고`, `테슬라 제외`\n"
+                "- **정렬·개수**: `배당 높은 순`, `많이 오른 순`, `시총 큰 순`, `상위 5개`, `세 종목`\n"
+                "- 오타는 비슷한 테마·종목 이름으로 보정합니다 (예: 반도채 → 반도체)")
         if q:
             with st.spinner("조건 해석 중…"):
-                f, how, note = nl_parser.parse(q, ANTHROPIC_KEY, CLAUDE_MODEL)
-            st.info(f"**해석 ({how})**: {describe(f)}" + (f"\n\n{note}" if note else ""))
+                f, how, notes = nl_parser.parse(q, ANTHROPIC_KEY, CLAUDE_MODEL, fx=fx)
+            names = dict(zip(data["code"].astype(str), data["name"]))
+            msg = f"**해석 ({how})**: {describe(f, names)}"
+            if notes:
+                msg += "\n\n" + "\n".join(f"- {n}" for n in notes)
+            if describe(f, names).startswith("조건 없음"):
+                st.warning(msg + "\n\n알아들은 조건이 없어 전체를 보여줍니다. 아래 '이런 표현을 알아들어요'를 참고해 주세요.")
+            else:
+                st.info(msg)
             show_results(apply_filters(data, f), "res_nl")
 
     elif mode == "🏷️ 섹터·테마":
