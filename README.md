@@ -90,18 +90,24 @@ GitHub에 올린 뒤 Streamlit Community Cloud(share.streamlit.io)에서 저장�
 
 ## 6. 종목 지표 미리 계산 (GitHub Actions)
 
-종목 찾기 화면이 바로 뜨도록, GitHub이 정해진 시각에 지표를 계산해 저장소의 `data` 브랜치에 저장합니다. 사이트는 이 파일을 읽기만 하고, 현재가만 실시간으로 덮어씁니다.
+종목 찾기 화면이 바로 뜨도록, GitHub이 정해진 시각에 지표를 **두 벌** 계산해 저장소의 `data` 브랜치에 저장합니다.
 
-- 실행 시각(한국시간): 평일 08:40, 12:10, 15:50 / 화~토 06:20 (미국 장 마감 후). GitHub 사정으로 몇 분~수십 분 늦을 수 있습니다.
-- 설정: 저장소 **Settings → Secrets and variables → Actions → New repository secret** 에 `KIS_APP_KEY`, `KIS_APP_SECRET` 등록. 없으면 야후로 계산합니다.
+| 파일 | 기준 | 누가 보나 | 공개 여부 |
+|---|---|---|---|
+| `metrics.csv`, `meta.json` | 야후 | 모든 방문자 | 공개 |
+| `metrics_kis.enc` | 한국투자증권 | 관리자(PIN 입력)만 | **암호화** — KIS_APP_SECRET으로만 풀림 |
+
+- 실행 시각(한국시간): 평일 08:40, 12:10, 15:50 / 화~토 06:20. GitHub 사정으로 몇 분~수십 분 늦을 수 있습니다.
+- 설정: 저장소 **Settings → Secrets and variables → Actions** 에 `KIS_APP_KEY`, `KIS_APP_SECRET` 등록. 없으면 야후 파일만 만듭니다.
 - 바로 한 번 돌리기: 저장소 **Actions → 종목 지표 미리 계산 → Run workflow**
-- 파일이 36시간 넘게 갱신되지 않으면 사이트가 예전처럼 직접 계산합니다.
-- 실행 시각은 `.github/workflows/precompute.yml` 의 cron 줄에서 바꿀 수 있습니다 (UTC 기준).
+- 한쪽 계산이 실패하면 그쪽 파일은 이전 것을 그대로 둡니다.
+- 파일이 36시간 넘게 갱신되지 않으면 사이트가 직접 계산합니다.
+- 키를 재발급하면 Streamlit과 GitHub 양쪽 Secrets를 모두 바꾸고 Run workflow를 한 번 돌리세요. 그 전까지 관리자 화면은 사이트에서 직접 계산합니다.
 
 ## 7. 증권사 API는 관리자만 (PIN)
 
 사이트는 누구나 볼 수 있지만, 증권사 API(내 키)는 **관리자 PIN을 입력한 화면에서만** 쓰입니다.
-다른 방문자는 야후 지연 시세와 미리 계산된 지표로 보며, 이때 증권사 호출은 일어나지 않습니다.
+다른 방문자는 야후 지연 시세와 야후 기준으로 미리 계산된 지표만 보며, 이때 증권사 호출은 일어나지 않습니다.
 
 - 설정: Streamlit **Settings → Secrets** 에 `OWNER_PIN = "원하는 PIN"` 한 줄 추가. 비워 두면 증권사 API는 모두에게 잠깁니다.
 - 사용: 사이드바 **🔒 관리자 PIN** 칸에 입력 → 증권사 API가 바로 켜짐
@@ -118,7 +124,8 @@ market.py       시세·차트·지표 계산 (yfinance + KIS)
 kis.py          한국투자증권 Open API 클라이언트
 screener.py     조건 필터
 nl_parser.py    문장 → 조건 변환 (Claude / 규칙)
-precompute.py   지표 사전 계산 (GitHub Actions가 실행)
+precompute.py   지표 사전 계산 (GitHub Actions가 실행, 야후용 공개 + 증권사용 암호화)
+secure_data.py  증권사용 사전 계산 파일 암호화/복호화
 ai_commentary.py  AI 해설 (Claude)
 tests/          문장 해석기 회귀 테스트
 .github/workflows/precompute.yml  사전 계산 예약 설정

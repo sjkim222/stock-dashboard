@@ -16,6 +16,7 @@ import streamlit as st
 import ai_commentary
 import market
 import nl_parser
+import secure_data
 from kis import KISClient
 from screener import apply_filters, describe
 from themes import INDICES, THEMES, build_universe
@@ -149,21 +150,40 @@ def start_rebuild(store):
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_precomputed(url):
-    """미리 계산된 지표 파일. 없거나 읽지 못하면 None."""
+    """방문자용: 야후 기준 공개 파일. 없거나 야후 기준이 아니면 None."""
     try:
         meta = requests.get(url + "meta.json", timeout=10).json()
+        if meta.get("source") != "Yahoo":
+            return None  # 예전 구조의 증권사 기준 파일은 방문자에게 보여주지 않는다
         res = requests.get(url + "metrics.csv", timeout=15)
         res.raise_for_status()
         df = pd.read_csv(io.StringIO(res.text), dtype={"code": str, "market": str})
         if df.empty:
             return None
-        return df, float(meta["fx"]), float(meta["ts"]), meta.get("source", "?")
+        return df, float(meta["fx"]), float(meta["ts"]), "Yahoo"
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_precomputed_kis(url, tag):
+    """관리자용: 증권사 기준 암호화 파일을 KIS_APP_SECRET으로 푼다. 실패하면 None.
+    tag는 캐시 구분용 (키가 바뀌면 새로 읽음). 이 함수는 관리자 화면에서만 호출된다."""
+    try:
+        res = requests.get(url + "metrics_kis.enc", timeout=15)
+        res.raise_for_status()
+        meta, csv_text = secure_data.decrypt_payload(KIS_SECRET, res.content)
+        df = pd.read_csv(io.StringIO(csv_text), dtype={"code": str, "market": str})
+        if df.empty:
+            return None
+        return df, float(meta["fx"]), float(meta["ts"]), "증권사"
     except Exception:
         return None
 
 
 def precomputed_fresh():
-    pre = load_precomputed(PRECOMPUTED_URL)
+    """지금 화면에 맞는 사전 계산 파일. 관리자(증권사 켬)는 암호화 파일, 그 외에는 야후 공개 파일."""
+    pre = load_precomputed_kis(PRECOMPUTED_URL, TAG) if KIS else load_precomputed(PRECOMPUTED_URL)
     return pre if pre and time.time() - pre[2] < PRECOMPUTED_MAX_AGE else None
 
 

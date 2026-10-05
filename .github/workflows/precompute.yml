@@ -31,7 +31,15 @@ jobs:
       - name: 패키지 설치
         run: pip install -r requirements.txt
 
-      - name: 지표 계산
+      - name: 이전 계산 파일 가져오기 (이번에 실패한 쪽은 이전 파일 유지)
+        run: |
+          mkdir -p out
+          if git fetch -q --depth 1 origin data; then
+            git --work-tree=out checkout FETCH_HEAD -- . && git reset -q
+          fi
+          ls -la out
+
+      - name: 지표 계산 (야후용 공개 + 증권사용 암호화)
         env:
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
@@ -43,7 +51,7 @@ jobs:
           git init -q -b data
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add metrics.csv meta.json
+          git add -A
           git commit -q -m "지표 갱신 $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M KST')"
           git push -q -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
         env:
