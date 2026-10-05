@@ -3,6 +3,7 @@
 
 실행:  streamlit run app.py
 """
+import hmac
 import io
 import threading
 import time
@@ -41,12 +42,51 @@ KIS_SECRET = str(secret("KIS_APP_SECRET", "") or "").strip()
 KIS_DEMO = str(secret("KIS_DEMO", "false")).strip().lower() == "true"
 HAS_KEYS = bool(KIS_KEY and KIS_SECRET)
 
+# ---- 관리자 확인: PIN을 맞힌 브라우저 화면에서만 증권사 API를 쓴다 ----
+OWNER_PIN = str(secret("OWNER_PIN", "") or "").strip()
+MAX_PIN_TRIES = 5
+st.session_state.setdefault("is_owner", False)
+st.session_state.setdefault("pin_tries", 0)
+
+
+def _try_pin():
+    pin = st.session_state.get("pin_in", "")
+    st.session_state["pin_in"] = ""  # 입력값은 바로 지운다
+    if OWNER_PIN and hmac.compare_digest(pin.encode(), OWNER_PIN.encode()):
+        st.session_state["is_owner"] = True
+        st.session_state["pin_tries"] = 0
+        st.session_state["use_kis"] = True  # PIN을 맞히면 바로 켠다
+    else:
+        st.session_state["pin_tries"] += 1
+
+
+def _lock():
+    st.session_state["is_owner"] = False
+    st.session_state["use_kis"] = False
+
+
 st.sidebar.header("⚙️ 데이터 설정")
+if HAS_KEYS and not st.session_state["is_owner"]:
+    if not OWNER_PIN:
+        st.sidebar.caption("🔒 증권사 API는 잠겨 있습니다. Secrets에 OWNER_PIN을 넣으면 관리자만 켤 수 있습니다.")
+    elif st.session_state["pin_tries"] >= MAX_PIN_TRIES:
+        st.sidebar.caption("🔒 PIN 시도 횟수를 넘었습니다. 브라우저를 새로 열어 다시 시도하세요.")
+    else:
+        st.sidebar.text_input("🔒 관리자 PIN (증권사 실시간 시세)", type="password", key="pin_in",
+                              on_change=_try_pin, help="관리자만 증권사 API를 쓸 수 있습니다. "
+                                                       "다른 방문자는 야후 지연 시세로 봅니다.")
+        if st.session_state["pin_tries"]:
+            st.sidebar.error(f"PIN이 맞지 않습니다 ({st.session_state['pin_tries']}/{MAX_PIN_TRIES})")
+
+IS_OWNER = st.session_state["is_owner"]
+CAN_KIS = HAS_KEYS and IS_OWNER
 USE_KIS = st.sidebar.toggle(
-    "한국투자증권 API 사용", value=HAS_KEYS, disabled=not HAS_KEYS, key="use_kis",
-    help="끄면 야후(지연 시세)로 바뀝니다. 이 브라우저 화면에만 적용되고, 다른 방문자에게는 영향이 없습니다."
-         if HAS_KEYS else "Secrets에 KIS_APP_KEY / KIS_APP_SECRET을 넣으면 켤 수 있습니다.")
-KIS = get_kis(KIS_KEY, KIS_SECRET, KIS_DEMO) if HAS_KEYS and USE_KIS else None
+    "한국투자증권 API 사용", value=CAN_KIS, disabled=not CAN_KIS, key="use_kis",
+    help="끄면 야후(지연 시세)로 바뀝니다. 이 브라우저 화면에만 적용됩니다."
+         if CAN_KIS else "관리자 PIN을 입력하면 켤 수 있습니다.")
+if IS_OWNER:
+    st.sidebar.button("🔓 관리자 잠금", help="이 화면에서 증권사 API를 다시 잠급니다", on_click=_lock)
+KIS = get_kis(KIS_KEY, KIS_SECRET, KIS_DEMO) if CAN_KIS and USE_KIS else None
 # 캐시 구분용 꼬리표: 키가 바뀌거나 새로 들어오면 모든 데이터를 새로 받는다
 TAG = f"kis-{KIS_KEY[-4:]}-{int(KIS_DEMO)}" if KIS else "yahoo"
 
@@ -55,9 +95,7 @@ TAG = f"kis-{KIS_KEY[-4:]}-{int(KIS_DEMO)}" if KIS else "yahoo"
 def check_kis(tag):
     """연결 점검: 토큰 발급 → 삼성전자 현재가 조회까지 실제로 해 본다."""
     if KIS is None:
-        if HAS_KEYS:
-            return False, "스위치가 꺼져 있습니다."
-        return False, "Secrets에서 KIS_APP_KEY / KIS_APP_SECRET을 찾지 못했습니다."
+        return False, "사용 안 함"
     try:
         KIS.token()
     except Exception as e:
@@ -274,28 +312,30 @@ def stock_detail(row):
 
 # ---------------- 사이드바 ----------------
 with st.sidebar:
-    ok, msg = check_kis(TAG)
+    ok, msg = check_kis(TAG) if KIS else (False, "")
     if ok:
         st.write("주 데이터: 🟢 한국투자증권 API (실시간)")
-    elif HAS_KEYS and not USE_KIS:
-        st.write("주 데이터: ⚪ 증권사 API 꺼짐 → 야후 (지연 시세)")
     elif KIS:
         st.write("주 데이터: 🔴 한국투자증권 연결 실패 → 야후로 대체 중")
+    elif CAN_KIS:
+        st.write("주 데이터: ⚪ 증권사 API 꺼짐 → 야후 (지연 시세)")
     else:
         st.write("주 데이터: 🟡 야후 (지연 시세)")
-    with st.expander("🔧 증권사 연결 점검", expanded=not ok and KIS is not None):
-        st.write(f"APP KEY: {'✅ ' + str(len(KIS_KEY)) + '자 감지' if KIS_KEY else '❌ 없음'}")
-        st.write(f"APP SECRET: {'✅ ' + str(len(KIS_SECRET)) + '자 감지' if KIS_SECRET else '❌ 없음'}")
-        st.write(f"모드: {'모의투자' if KIS_DEMO else '실전'}")
-        st.write(f"결과: {msg}")
-        if st.button("다시 점검"):
-            check_kis.clear()
-            st.rerun()
+    if IS_OWNER or not HAS_KEYS:
+        # 점검 정보는 관리자에게만 (키 없는 개인 실행 환경에서는 설정 안내용으로 표시)
+        with st.expander("🔧 증권사 연결 점검", expanded=not ok and KIS is not None):
+            st.write(f"APP KEY: {'✅ ' + str(len(KIS_KEY)) + '자 감지' if KIS_KEY else '❌ 없음'}")
+            st.write(f"APP SECRET: {'✅ ' + str(len(KIS_SECRET)) + '자 감지' if KIS_SECRET else '❌ 없음'}")
+            st.write(f"모드: {'모의투자' if KIS_DEMO else '실전'}")
+            st.write(f"결과: {msg or ('스위치가 꺼져 있습니다.' if HAS_KEYS else 'Secrets에 키가 없습니다.')}")
+            if KIS and st.button("다시 점검"):
+                check_kis.clear()
+                st.rerun()
     if KIS:
         st.caption("배당률은 증권사 시세 API에 없어 야후에서 보충합니다. 받지 못하면 빈칸입니다.")
     st.write("자연어 해석:", "🟢 Claude API" if ANTHROPIC_KEY else "🟡 규칙 기반")
     auto = st.toggle("지수 자동 새로고침 (10초)", value=bool(KIS))
-    if st.button("🔄 전체 데이터 새로 받기"):
+    if (IS_OWNER or not HAS_KEYS) and st.button("🔄 전체 데이터 새로 받기"):
         st.cache_data.clear()
         start_rebuild(metrics_store(TAG))
         st.rerun()
