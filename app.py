@@ -16,7 +16,6 @@ import streamlit as st
 import ai_commentary
 import market
 import nl_parser
-import secure_data
 from kis import KISClient
 from screener import apply_filters, describe
 from themes import INDICES, THEMES, build_universe
@@ -165,35 +164,21 @@ def load_precomputed(url):
         return None
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def load_precomputed_kis(url, tag):
-    """관리자용: 증권사 기준 암호화 파일을 KIS_APP_SECRET으로 푼다. 실패하면 None.
-    tag는 캐시 구분용 (키가 바뀌면 새로 읽음). 이 함수는 관리자 화면에서만 호출된다."""
-    try:
-        res = requests.get(url + "metrics_kis.enc", timeout=15)
-        res.raise_for_status()
-        meta, csv_text = secure_data.decrypt_payload(KIS_SECRET, res.content)
-        df = pd.read_csv(io.StringIO(csv_text), dtype={"code": str, "market": str})
-        if df.empty:
-            return None
-        return df, float(meta["fx"]), float(meta["ts"]), "증권사"
-    except Exception:
-        return None
-
-
 def precomputed_fresh():
-    """지금 화면에 맞는 사전 계산 파일. 관리자(증권사 켬)는 암호화 파일, 그 외에는 야후 공개 파일."""
-    pre = load_precomputed_kis(PRECOMPUTED_URL, TAG) if KIS else load_precomputed(PRECOMPUTED_URL)
+    """야후 기준 공개 사전 계산 파일. 예약 계산은 증권사 API를 쓰지 않으므로 관리자도 이 파일을 기본으로 쓴다.
+    관리자 화면에서는 이 표 위에 현재가만 증권사 실시간으로 덮어쓴다 (load_live)."""
+    pre = load_precomputed(PRECOMPUTED_URL)
     return pre if pre and time.time() - pre[2] < PRECOMPUTED_MAX_AGE else None
 
 
 def load_metrics(tag):
     """반환: (지표 표, 환율, 기준 시각, 출처 설명)"""
     pre = precomputed_fresh()
-    if pre:
+    store = metrics_store(tag)
+    # 관리자가 '전체 데이터 새로 받기'로 증권사 기준 표를 만들었다면 그쪽이 더 최신이다
+    if pre and not (store["df"] is not None and store["ts"] > pre[2]):
         df, fx, ts, src = pre
         return df, fx, ts, f"미리 계산 ({src})"
-    store = metrics_store(tag)
     if store["df"] is None:
         start_rebuild(store)
         with st.spinner("종목 지표를 처음 모으는 중입니다… (이후에는 바로 열립니다)"):

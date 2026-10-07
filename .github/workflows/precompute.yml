@@ -31,7 +31,7 @@ jobs:
       - name: 패키지 설치
         run: pip install -r requirements.txt
 
-      - name: 이전 계산 파일 가져오기 (이번에 실패한 쪽은 이전 파일 유지)
+      - name: 이전 계산 파일 가져오기 (이번 계산이 실패하면 이전 파일 유지)
         run: |
           mkdir -p out
           if git fetch -q --depth 1 origin data; then
@@ -39,10 +39,8 @@ jobs:
           fi
           ls -la out
 
-      - name: 지표 계산 (야후용 공개 + 증권사용 암호화)
-        env:
-          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
-          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+      # 한국투자증권 API는 쓰지 않는다 (자동 호출 0번, 키도 넘기지 않음)
+      - name: 지표 계산 (야후 기준 공개)
         run: python precompute.py --out out
 
       - name: data 브랜치에 저장
