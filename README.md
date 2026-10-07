@@ -90,19 +90,13 @@ GitHub에 올린 뒤 Streamlit Community Cloud(share.streamlit.io)에서 저장�
 
 ## 6. 종목 지표 미리 계산 (GitHub Actions)
 
-종목 찾기 화면이 바로 뜨도록, GitHub이 정해진 시각에 지표를 **두 벌** 계산해 저장소의 `data` 브랜치에 저장합니다.
+종목 찾기 화면이 바로 뜨도록, GitHub이 정해진 시각에 **야후 기준** 지표를 계산해 저장소의 `data` 브랜치(`metrics.csv`, `meta.json`, 공개)에 저장합니다.
 
-| 파일 | 기준 | 누가 보나 | 공개 여부 |
-|---|---|---|---|
-| `metrics.csv`, `meta.json` | 야후 | 모든 방문자 | 공개 |
-| `metrics_kis.enc` | 한국투자증권 | 관리자(PIN 입력)만 | **암호화** — KIS_APP_SECRET으로만 풀림 |
-
+- **한국투자증권 API는 호출하지 않습니다** (자동 호출 0번). GitHub Secrets에 증권사 키를 넣을 필요도 없습니다.
 - 실행 시각(한국시간): 평일 08:40, 12:10, 15:50 / 화~토 06:20. GitHub 사정으로 몇 분~수십 분 늦을 수 있습니다.
-- 설정: 저장소 **Settings → Secrets and variables → Actions** 에 `KIS_APP_KEY`, `KIS_APP_SECRET` 등록. 없으면 야후 파일만 만듭니다.
 - 바로 한 번 돌리기: 저장소 **Actions → 종목 지표 미리 계산 → Run workflow**
-- 한쪽 계산이 실패하면 그쪽 파일은 이전 것을 그대로 둡니다.
-- 파일이 36시간 넘게 갱신되지 않으면 사이트가 직접 계산합니다.
-- 키를 재발급하면 Streamlit과 GitHub 양쪽 Secrets를 모두 바꾸고 Run workflow를 한 번 돌리세요. 그 전까지 관리자 화면은 사이트에서 직접 계산합니다.
+- 계산이 실패하면 이전 파일을 그대로 둡니다. 파일이 36시간 넘게 갱신되지 않으면 사이트가 직접 계산합니다.
+- 관리자(PIN 입력) 화면도 이 표를 기본으로 쓰고, 현재가만 증권사 실시간으로 1분마다 덮어씁니다. 지표 전체를 증권사 기준으로 받으려면 사이드바의 "전체 데이터 새로 받기"를 누르세요.
 
 ## 7. 증권사 API는 관리자만 (PIN)
 
@@ -124,8 +118,7 @@ market.py       시세·차트·지표 계산 (yfinance + KIS)
 kis.py          한국투자증권 Open API 클라이언트
 screener.py     조건 필터
 nl_parser.py    문장 → 조건 변환 (Claude / 규칙)
-precompute.py   지표 사전 계산 (GitHub Actions가 실행, 야후용 공개 + 증권사용 암호화)
-secure_data.py  증권사용 사전 계산 파일 암호화/복호화
+precompute.py   지표 사전 계산 (GitHub Actions가 실행, 야후 기준, 증권사 호출 없음)
 ai_commentary.py  AI 해설 (Claude)
 tests/          문장 해석기 회귀 테스트
 .github/workflows/precompute.yml  사전 계산 예약 설정
